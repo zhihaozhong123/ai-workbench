@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -33,7 +34,7 @@ from infra.state_store import get_lock, get_redis
 from observability.logging_config import get_logger
 from skills import catalog
 from skills.installer import install_zip_bytes, remove_skill
-from skills.manifest import SkillError
+from skills.manifest import SkillError, load_manifest
 
 log = get_logger(__name__)
 
@@ -343,34 +344,53 @@ async def install_skill(slug: str, user=Depends(get_current_user), db=Depends(ge
 
     async with get_lock(f"skill:install:{slug}"):
         skill = (await db.execute(select(Skill).where(Skill.slug == slug))).scalar_one_or_none()
-        if not skill or not skill.artifact_url:
+        if not skill:
             raise HTTPException(
                 status_code=404,
                 detail="该技能不在市场快照中。请先在「技能源」添加其发布仓库并完成同步。",
             )
 
-        # 下载 → 校验解压 → 原子落盘
-        try:
-            data = await catalog.download_artifact(skill.artifact_url, settings.github_token)
-            manifest, _dest = install_zip_bytes(settings.skills_root, data)
-        except (catalog.GitHubSourceError, SkillError, OSError) as e:
-            msg = str(e)[:2000]
-            # 登记失败状态：前端可展示「安装失败/重试」，且不会进入任务工具链
-            inst = (await db.execute(
-                select(InstalledSkill).where(
-                    InstalledSkill.user_id == user_id, InstalledSkill.slug == slug
+        is_local = skill.source_key == "local"
+
+        # 本地技能：文件已在磁盘（由 install_skill.py 预置），直接登记，无需下载
+        if is_local:
+            skill_dir = Path(settings.skills_root) / slug
+            if not skill_dir.is_dir():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"本地技能文件缺失：{skill_dir}。请联系管理员运行 install_skill.py。",
                 )
-            )).scalar_one_or_none()
-            if inst is None:
-                inst = InstalledSkill(user_id=user_id, slug=slug)
-                db.add(inst)
-            inst.status = "failed"
-            inst.error = msg
-            inst.source_key = skill.source_key
-            inst.updated_at = _utcnow()
-            await db.commit()
-            log.error("[技能] 安装失败 %s (user=%s): %s", slug, user_id, msg)
-            raise HTTPException(status_code=400, detail=f"技能安装失败：{msg}") from e
+            try:
+                manifest = load_manifest(skill_dir)
+            except (SkillError, OSError) as e:
+                raise HTTPException(status_code=400, detail=f"技能清单读取失败：{e}") from e
+        else:
+            # 远程技能：下载 → 校验解压 → 原子落盘
+            if not skill.artifact_url:
+                raise HTTPException(
+                    status_code=404,
+                    detail="该技能不在市场快照中。请先在「技能源」添加其发布仓库并完成同步。",
+                )
+            try:
+                data = await catalog.download_artifact(skill.artifact_url, settings.github_token)
+                manifest, _dest = install_zip_bytes(settings.skills_root, data)
+            except (catalog.GitHubSourceError, SkillError, OSError) as e:
+                msg = str(e)[:2000]
+                inst = (await db.execute(
+                    select(InstalledSkill).where(
+                        InstalledSkill.user_id == user_id, InstalledSkill.slug == slug
+                    )
+                )).scalar_one_or_none()
+                if inst is None:
+                    inst = InstalledSkill(user_id=user_id, slug=slug)
+                    db.add(inst)
+                inst.status = "failed"
+                inst.error = msg
+                inst.source_key = skill.source_key
+                inst.updated_at = _utcnow()
+                await db.commit()
+                log.error("[技能] 安装失败 %s (user=%s): %s", slug, user_id, msg)
+                raise HTTPException(status_code=400, detail=f"技能安装失败：{msg}") from e
 
         existed = (await db.execute(
             select(InstalledSkill).where(

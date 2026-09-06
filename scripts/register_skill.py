@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""本地技能注册脚本：把 data/skills/ 下已安装的技能登记到数据库。
+"""本地技能注册脚本：把 data/skills/ 下的技能登记到数据库的市场快照表。
 
-用途：通过 install_skill.py 安装到磁盘的技能，需要在数据库中登记后才会出现在
-技能市场和对话任务中。本脚本扫描 data/skills/ 并写入 skills（市场快照）
-和 installed_skills（用户安装）两张表。
+用途：通过 install_skill.py 安装到磁盘的技能，需要登记到 skills 表后才会出现在
+技能市场中。用户在市场点击「安装」后，才会写入 installed_skills 表。
+
+默认只登记 skills 表（市场），不自动安装给任何用户。
+使用 --installed 可同时登记到 installed_skills（仅用于本地测试）。
 
 用法：
-    # 注册指定技能给指定用户
-    python scripts/register_skill.py wechat-article-publish --user-id <user_id>
+    # 仅登记到市场（推荐）
+    python scripts/register_skill.py wechat-article-publish
 
-    # 注册所有本地技能
-    python scripts/register_skill.py --all --user-id <user_id>
+    # 登记所有本地技能到市场
+    python scripts/register_skill.py --all
+
+    # 登记到市场并直接安装给指定用户（本地测试用）
+    python scripts/register_skill.py wechat-article-publish --installed --user-id <user_id>
 
     # 列出所有本地已安装技能
     python scripts/register_skill.py --list
@@ -44,8 +49,8 @@ def _local_skills() -> list[tuple[str, Path]]:
     return result
 
 
-async def _register_one(slug: str, skill_dir: Path, user_id: str) -> None:
-    """把一个技能登记到 skills 表和 installed_skills 表。"""
+async def _register_one(slug: str, skill_dir: Path, user_id: str, also_install: bool) -> None:
+    """把技能登记到 skills 表；also_install=True 时同时登记 installed_skills 表。"""
     manifest = load_manifest(skill_dir)
     async with SessionLocal() as db:
         # 1) 写入/更新 skills 表（市场快照）
@@ -68,45 +73,50 @@ async def _register_one(slug: str, skill_dir: Path, user_id: str) -> None:
         skill.release_url = ""
         skill.updated_at = _utcnow()
 
-        # 2) 写入/更新 installed_skills 表（用户安装）
-        inst = (await db.execute(
-            select(InstalledSkill).where(
-                InstalledSkill.user_id == user_id, InstalledSkill.slug == manifest.slug
-            )
-        )).scalar_one_or_none()
-        if inst is None:
-            inst = InstalledSkill(user_id=user_id, slug=manifest.slug)
-            db.add(inst)
-        inst.name = manifest.name
-        inst.version = manifest.version
-        inst.description = manifest.description
-        inst.emoji = manifest.emoji
-        inst.category = manifest.category
-        inst.source_key = "local"
-        inst.status = "ok"
-        inst.error = ""
-        inst.updated_at = _utcnow()
+        # 2) 仅在 --installed 时写入 installed_skills 表（用户安装）
+        if also_install:
+            inst = (await db.execute(
+                select(InstalledSkill).where(
+                    InstalledSkill.user_id == user_id, InstalledSkill.slug == manifest.slug
+                )
+            )).scalar_one_or_none()
+            if inst is None:
+                inst = InstalledSkill(user_id=user_id, slug=manifest.slug)
+                db.add(inst)
+            inst.name = manifest.name
+            inst.version = manifest.version
+            inst.description = manifest.description
+            inst.emoji = manifest.emoji
+            inst.category = manifest.category
+            inst.source_key = "local"
+            inst.status = "ok"
+            inst.error = ""
+            inst.updated_at = _utcnow()
 
         await db.commit()
-        print(f"[register] {manifest.name} v{manifest.version} (slug={manifest.slug}) 已登记")
-        print(f"           分类: {manifest.category} | 用户: {user_id}")
+        action = "登记到市场" if not also_install else f"登记到市场并安装给用户 {user_id}"
+        print(f"[register] {manifest.name} v{manifest.version} (slug={manifest.slug}) {action}")
+        print(f"           分类: {manifest.category} | source_key=local")
 
 
 async def main() -> int:
-    ap = argparse.ArgumentParser(description="把本地技能登记到 ai-workbench 数据库")
+    ap = argparse.ArgumentParser(description="把本地技能登记到 ai-workbench 技能市场")
     ap.add_argument("slug", nargs="?", help="技能 slug（留空配合 --all 或 --list）")
-    ap.add_argument("--all", action="store_true", help="注册所有本地技能")
+    ap.add_argument("--all", action="store_true", help="登记所有本地技能到市场")
     ap.add_argument("--list", action="store_true", help="列出所有本地技能")
-    ap.add_argument("--user-id", default="local-dev", help="用户 ID（默认 local-dev）")
+    ap.add_argument("--installed", action="store_true",
+                    help="同时登记到 installed_skills（仅本地测试，默认不安装）")
+    ap.add_argument("--user-id", default="local-dev",
+                    help="配合 --installed 使用的用户 ID（默认 local-dev）")
     args = ap.parse_args()
 
     local = _local_skills()
 
     if args.list:
         if not local:
-            print("（data/skills/ 下没有已安装的技能）")
+            print("（data/skills/ 下没有技能）")
             return 0
-        print(f"本地已安装技能（共 {len(local)} 个）：")
+        print(f"本地技能（共 {len(local)} 个）：")
         for slug, path in local:
             try:
                 m = load_manifest(path)
@@ -133,7 +143,7 @@ async def main() -> int:
 
     for slug, path in targets:
         try:
-            await _register_one(slug, path, args.user_id)
+            await _register_one(slug, path, args.user_id, args.installed)
         except SkillError as e:
             print(f"[register] {slug} 登记失败：{e}", file=sys.stderr)
             return 1
