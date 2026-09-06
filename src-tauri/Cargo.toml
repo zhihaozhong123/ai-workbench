@@ -1,0 +1,31 @@
+[package]
+name = "ai-workbench"
+version = "0.1.0"
+description = "智作台 (AI Workbench) - 本地 macOS AI 技能工作台"
+authors = ["you"]
+edition = "2021"
+rust-version = "1.77"
+
+# 桌面端只需要 rlib；staticlib/cdylib 是为移动端预留，保留无妨
+[lib]
+name = "ai_workbench_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+# TODO: 等后端上 HTTPS 后取消注释，恢复更新功能
+# tauri-plugin-updater = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

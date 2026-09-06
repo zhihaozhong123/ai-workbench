@@ -1,0 +1,4 @@
+# 本地 uv 源配置（与 Dockerfile 构建源一致，避免默认 pypi.org 在国内网络超时）
+# uv run / uv sync 会读取此文件；Docker 构建阶段因 COPY 顺序不会用到它（用 Dockerfile 的 --index-url 参数）。
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+extra-index-url = ["https://mirrors.aliyun.com/pypi/simple"]

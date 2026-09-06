@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 允许向其他 App 发送 Apple 事件（run_apple_script 控制本机 App 所需） -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <!-- 允许向外发起网络连接（邮件 SMTP / Gmail API / RAG 等后端联网所需） -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- 允许读写用户自选目录（记忆 / 配置文件的本地存储） -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

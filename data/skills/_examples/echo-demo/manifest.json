@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "slug": "echo-demo",
+  "name": "复读演示（示例）",
+  "version": "1.0.0",
+  "description": "一个最小可运行的示例技能：把用户说的话原样复读一遍，用于演示技能开发→打包→安装→对话任务全链路。",
+  "author": "zhihaozhong123",
+  "emoji": "📢",
+  "category": "示例",
+  "homepage": "https://github.com/zhihaozhong123/ai-workbench",
+  "runtime": {
+    "type": "python",
+    "entry": "scripts/main.py",
+    "cli": "run",
+    "timeout_seconds": 15,
+    "env_whitelist": []
+  },
+  "system_prompt_file": "AGENT.md",
+  "permissions": [],
+  "min_app_version": "0.1.0"
+}

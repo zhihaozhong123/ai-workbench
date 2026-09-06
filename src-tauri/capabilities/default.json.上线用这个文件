@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "智作台默认权限：前端通过原生 fetch / WebSocket 直连本机后端，无需额外 Tauri 插件权限。",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "updater:default"
+    "dialog:default"
+  ]
+}

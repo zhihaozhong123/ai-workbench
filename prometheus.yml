@@ -1,0 +1,44 @@
+# 智作台 - Prometheus 抓取配置（供 docker-compose 的 prometheus 服务挂载）
+# 访问：http://localhost:9090  ->  Status > Targets 查看健康
+#
+# target 统一用 backend:8000（docker compose 内部网络，prometheus 与 backend 同网络）。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # 后端自带的 /metrics（uvicorn 指标 + 本项目 metrics.py 业务指标）
+  - job_name: xiaoshutong-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['backend:8000']
+
+  # Redis 资源指标（redis-exporter，:9121）：连接数 / 命中率 / 命令吞吐 / 内存
+  - job_name: redis
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  # PostgreSQL 资源指标（postgres-exporter，:9187）：连接数 / 活跃事务 / 锁 / 缓存命中率
+  - job_name: postgres
+    static_configs:
+      - targets: ['pg-exporter:9187']
+
+  # Chroma 探活（blackbox-exporter，:9115）：对 chroma:8000 做 HTTP 探活，
+  # 暴露存活(probe_success) / 延迟(probe_duration_seconds) / 状态码，
+  # 弥补 Chroma 无官方 exporter 的缺口（并发分析中它是潜在天花板之一）。
+  - job_name: chroma-blackbox
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ['chroma:8000']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # 下列组件默认未暴露 Prometheus 格式指标：
+  # （Chroma 已用 blackbox 探活兜底；其余如有需要再补 exporter）

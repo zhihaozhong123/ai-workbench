@@ -1,0 +1,47 @@
+# 智作台 - Promtail 采集配置
+# 职责：通过 docker.sock 服务发现，读取所有容器日志（默认 json-file 驱动），
+# 解析 docker 信封 + 应用层 JSON，提取 level/logger 标签；审计行完整保留 msg
+# （action/user/detail/ip），供 Grafana 中 LogQL 检索与告警。
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /promtail/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # 容器名（去掉前缀 '/'）→ container 标签，便于查询 xiaoshutong-backend-1/2
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container
+      # docker-compose 服务名 → compose_service 标签
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: compose_service
+      # 日志流 stdout/stderr → stream 标签
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: stream
+    pipeline_stages:
+      # 解析 docker json-file 信封（{"log":..., "time":...}）→ line/time
+      - docker: {}
+      # 解析应用层 JSON（msg/level/logger/ts/module/func/lineno）
+      - json:
+          expressions:
+            level: level
+            logger: logger
+            msg: msg
+            ts: ts
+            module: module
+            func: func
+            lineno: lineno
+      # 把解析出的 level/logger 设为标签，方便按级别/日志器过滤
+      - labels:
+          level:
+          logger:

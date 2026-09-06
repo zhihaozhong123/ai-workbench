@@ -1,0 +1,26 @@
+# 本地凭证（绝不进 git）
+.163_creds
+.env
+
+# 更新签名密钥（绝不进 git）
+scripts/updater_keys/
+scripts/update_manifest/
+
+# 更新文件（DMG 安装包不进 git）
+updates/downloads/*.dmg
+
+# 构建临时目录
+build_tmp/
+
+# 技能构建产物（.xskill 通过 GitHub Release 分发，不入 git）
+data/skills/*/dist/
+data/skills/dist/
+*.xskill
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+cache/
+*.log
+src-tauri/target/

@@ -1,0 +1,48 @@
+[project]
+name = "ai-workbench"
+version = "2.0.0"
+description = "智作台 (AI Workbench) - 本地 macOS AI 技能工作台 Agent (LangGraph + ReAct + ChromaDB + Tauri)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # ===== Agent / LLM =====
+    "langchain>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langgraph>=0.2.0",
+    # ===== 知识库 / 记忆 =====
+    "llama-index>=0.12.0",
+    "llama-index-embeddings-openai>=0.2.0",
+    "chromadb>=0.5.0,<2",
+    "openai>=1.0.0",
+    # ===== 联网搜索 =====
+    "google-search-results>=2.4.2",
+    # ===== Web 服务 =====
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    # ===== 鉴权 =====
+    "bcrypt>=4.0.0",
+    "PyJWT>=2.0.0",
+    # ===== 配置 / 工具 =====
+    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.0.0",
+    "requests>=2.31.0",
+    "python-multipart>=0.0.9",
+    "llama-index-vector-stores-chroma>=0.5.5",
+    "jieba>=0.42.1",
+    "rank-bm25>=0.2.2",
+    "pypdf>=6.14.2",
+    "docx2txt>=0.9",
+    "python-docx>=1.1.0",
+    "llama-index-readers-file>=0.6.0",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "psycopg[binary]>=3.3.4",
+    "asyncpg>=0.31.0",
+    "prometheus-client>=0.25.0",
+    # ===== 多实例共享协调（必填；统一走 Redis，REDIS_URL 未配置则启动报错）=====
+    "redis>=5.0.0",
+    "cryptography>=49.0.0",
+]
+
+
