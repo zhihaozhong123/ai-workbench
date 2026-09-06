@@ -1,79 +1,40 @@
-# 公众号文章批量发布（智作台技能 XST-Skill v1）
+# 公众号文章批量发布
 
-> 把内容草稿一键发布到微信公众号；NLP 自动生成标题 / 摘要 / 关键词 / 封面图描述。
+> 把内容草稿一键发布到微信公众号，自动生成标题、摘要、关键词和封面图描述。
 
-## 这是什么
+## 这个技能能帮你做什么
 
-智作台（AI Workbench）的**技能包**：用户安装后，在「对话任务」会出现一个**公众号文章发布**的专属入口；
-Agent 会注入技能系统提示，并自动获得 `skill_wechat_article_publish` 工具，
-按需调用完成「文章生成 → 公众号草稿」的全流程。
+- 自动从正文抽取标题、摘要、5 个核心关键词
+- 把 Markdown 正文转为公众号适配的 HTML（内联样式）
+- 生成封面图提示词（可送文生图模型）
+- 一键推送到微信公众号草稿箱（需配置凭证）
 
-## 目录
+## 适合什么场景
 
-```
-wechat-article-publish/
-├── manifest.json          # 权威元数据
-├── SKILL.md               # 给 Agent 的技能说明
-├── AGENT.md               # 注入 Agent 的系统提示
-├── scripts/
-│   └── main.py            # CLI（确定性 NLP + 公众号 HTML 生成）
-├── requirements.txt       # Python 依赖
-└── README.md              # 本文件
-```
+- 内容运营需要批量产出可发布到公众号的草稿
+- 用户提供了文章内容，希望快速生成公众号格式
+- 需要把已有文章同步发布到微信公众号
 
-## 快速开发
+## 使用前需要准备什么
 
-```bash
-# 1) 安装依赖
-pip install -r requirements.txt
+- **仅生成草稿**：无需任何配置，直接使用
+- **推送到公众号**：需要在系统设置中配置 `WECHAT_APP_ID` 和 `WECHAT_APP_SECRET`（微信公众号 AppID/AppSecret）
 
-# 2) 本地手测
-echo '{"params":{"content":"# 标题\n\n这是一段正文示例。","publish":false}}' \
-  | python scripts/main.py
-```
+## 你可以这样告诉 Agent
 
-预期输出（截断）：
+> "把这篇文章发到公众号：【粘贴正文】"
+>
+> "帮我生成一篇公众号推文，主题是【xxx】"
+>
+> "把下面的内容整理成公众号文章格式"
 
-```json
-{
-  "ok": true,
-  "data": {
-    "title": "标题：内容",
-    "summary": "…",
-    "keywords": ["关键词1", "关键词2"],
-    "cover_prompt": "公众号封面图，主题：「…」，融合元素：…",
-    "html": "<!DOCTYPE html>…",
-    "publish_url": null,
-    "status": "generated"
-  }
-}
-```
+## 执行后你会得到什么
 
-## 在智作台安装
+- `publish=false`（默认）：生成标题、摘要、关键词、封面图提示词、公众号 HTML 草稿，供你审阅后再确认发布
+- `publish=true`：直接推送到微信公众号草稿箱，返回文章链接
 
-```bash
-# 在 ai-workbench 项目根目录打包
-python scripts/build_skill.py data/skills/wechat-article-publish
-# → dist/skill-wechat-article-publish-1.0.0.xskill
+## 注意事项
 
-# 发布到 GitHub Release（一键：tag + release + asset）
-bash scripts/release_skill.sh data/skills/wechat-article-publish
-```
-
-随后在智作台「技能市场 → 管理技能源」添加 `zhihaozhong123/<repo>` 即可同步、安装。
-
-## 发布到真实公众号（生产）
-
-1. 申请微信公众号「AppID / AppSecret」；
-2. 在宿主 `.env` 写入（manifest.runtime.env_whitelist 已声明注入）：
-   ```
-   WECHAT_APP_ID=your_app_id
-   WECHAT_APP_SECRET=your_app_secret
-   ```
-3. 把 `scripts/main.py` 中 `publish_to_wechat` 的真实实现注释取消（cgi-bin/token + draft/add）。
-
-## 安全
-
-- 凭据不进技能包（仅由 env_whitelist 注入）；
-- 子进程隔离（超时 30s / Redis 分布式信号量）；
-- `publish=true` 时严格依赖 WECHAT_APP_ID / WECHAT_APP_SECRET；缺凭证返回结构化错误而非 mock。
+- 默认只生成草稿，不会自动发布；确认后再推送
+- 关键词、摘要为 AI 自动抽取，重要内容请二次确认
+- 未配置微信凭证时，`publish=true` 仅返回演示链接

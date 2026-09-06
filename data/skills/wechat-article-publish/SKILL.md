@@ -18,7 +18,7 @@
 | `title` |  | 标题；缺省时 NLP 自动生成 |
 | `author` |  | 作者署名；缺省 `智作台` |
 | `tags` |  | 标签列表；缺省时 NLP 抽取 |
-| `publish` |  | 是否真正推送到微信；缺省 ` `false`（仅生成草稿） |
+| `publish` |  | 是否真正推送到微信；缺省 `false`（仅生成草稿） |
 
 ## 出参（`data`）
 
@@ -41,18 +41,18 @@ echo '{"params":{"content":"# 标题\n\n正文...","publish":false}}' \
 
 ## 发布到公众号
 
-`publish=true` 时调用 `publish_to_wechat`。生产部署需：
+`publish=true` 时调用微信公众号开放接口。生产部署需：
 
 1. 申请微信公众号「AppID / AppSecret」并写入宿主 `.env`：
    ```
    WECHAT_APP_ID=your_app_id
    WECHAT_APP_SECRET=your_app_secret
    ```
-2. 实现微信开放接口调用（cgi-bin/token 获取 access_token → cgi-bin/draft/add 写入草稿箱）。
-   当前 CLI 默认返回 mock URL，便于本地演示。
+2. 技能通过 `cgi-bin/token` 获取 access_token → `cgi-bin/draft/add` 写入草稿箱。
+3. 凭证未配置时 `publish=true` 返回 mock URL（仅本地演示），生产环境应改为报错。
 
 ## 安全
 
 - 凭证不进技能包：通过 `manifest.runtime.env_whitelist` 由宿主 `.env` 注入；
 - 子进程隔离：超时 30s、Redis 分布式信号量限制并发；
-- 凭据未配置时 `publish=true` 会返回 `[ERROR]` 提示，绝不悄悄走 mock 路径。
+- 凭据未配置时绝不悄悄走真实发布路径。

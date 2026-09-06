@@ -17,6 +17,11 @@ data/skills/*/dist/
 data/skills/dist/
 *.xskill
 
+# 独立技能仓库（有自己的 git，不进 ai-workbench）
+skill-scaffold/
+skills-src/
+skill-template/
+
 # Python
 __pycache__/
 *.pyc
