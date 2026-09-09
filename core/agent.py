@@ -22,9 +22,9 @@ from langgraph.prebuilt import create_react_agent
 
 from core.memory import long_term as lt
 from config import settings
-from observability.logging_config import get_logger
+import logging
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # ==================== 静态系统提示词（来自 prompts/*.md） ====================
 _PROMPT_DIR = pathlib.Path(__file__).parent / "prompts"
@@ -150,7 +150,7 @@ def create_llm(temperature: float = 0.7, max_tokens: int = 2048, streaming: bool
         base_url=settings.deepseek_base_url,
         temperature=temperature,
         max_tokens=max_tokens,
-        max_retries=3,   # API 抖动/网络异常时自动重试，避免模型输出中途断裂
+        max_retries=1,   # 降低重试：3→1，避免单次 LLM 卡死时 4×60=240s 占满 worker
         timeout=settings.llm_request_timeout,  # 单次请求超时，避免 LLM 卡死占满连接
         streaming=streaming,
     )

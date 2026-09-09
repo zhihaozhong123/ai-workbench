@@ -1,4 +1,4 @@
-"""智作台 (AI Workbench) API 入口 - 薄入口层，业务逻辑在 api/ core/ infra/ observability/ 模块中"""
+"""智作台 (AI Workbench) API 入口 - 薄入口层，业务逻辑在 api/ core/ infra/ 模块中"""
 import json
 import uuid
 import asyncio
@@ -11,7 +11,7 @@ from config import settings
 from infra.db import User, Conversation, SessionLocal
 from infra.security import decode_access_token
 from infra.state_store import get_lock, rate_allow
-from observability.logging_config import get_logger
+import logging
 
 # 导入各路由模块
 from api.routes_auth import router as auth_router
@@ -19,12 +19,11 @@ from api.routes_conversation import router as conversation_router
 from api.routes_chat import router as chat_router
 from api.routes_messages import router as messages_router
 from api.routes_skills import router as skills_router
-from api.routes_update import router as update_router
 
 # API 应用实例（由 api/app.py 创建）
 from api.app import app
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 # --------------------- 注册所有路由 ---------------------
@@ -33,7 +32,6 @@ app.include_router(conversation_router)
 app.include_router(chat_router)
 app.include_router(messages_router)
 app.include_router(skills_router)
-app.include_router(update_router)
 
 
 # --------------------- WebSocket 聊天 ---------------------
@@ -85,6 +83,16 @@ async def ws_chat(websocket: WebSocket):
             """为单条用户消息启动一次真正独立的 agent 运行。"""
             thread_id = f"{user_id}:{conv_id_inner}:run:{run_id}"
             lock = get_lock(f"run:{thread_id}")
+
+            async def _send_ev(msg: dict):
+                """带超时的事件下发：客户端缓冲区满/半死连接时最多阻塞 15s，
+                绝不让 send_json 永久挂起拖死整个运行（历史 bug：WS 背压导致
+                运行僵死且无任何日志与终止事件，前端永远「正在操作…」）。"""
+                try:
+                    await asyncio.wait_for(websocket.send_json(msg), 15)
+                except Exception:
+                    pass
+
             async with lock:
                 loop_detected = False
                 final_reply = ""
@@ -105,17 +113,21 @@ async def ws_chat(websocket: WebSocket):
                         exclude_message_id=client_msg_id,
                         before_seq=context_before_seq,
                     )
-                    async for ev in agent_runner.chat_stream(
-                        user_id, thread_id, content,
-                        user_name=display_name, history=history, skill_id=skill_id,
-                    ):
-                        out = dict(ev)
-                        out["run_id"] = run_id
-                        await websocket.send_json(out)
-                        if ev.get("type") == "final":
-                            final_reply = ev.get("reply") or ""
-                        if ev.get("type") == "loop_detected":
-                            loop_detected = True
+                    # 消费级硬看门狗：chat_stream 内部已有 asyncio.timeout，但若
+                    # 取消传播在 LangGraph/WS 内部失效，这里兜底在 chat_timeout+60s
+                    # 强制结束并通知前端，保证「必有终止事件」。
+                    async with asyncio.timeout(settings.chat_timeout_seconds + 60):
+                        async for ev in agent_runner.chat_stream(
+                            user_id, thread_id, content,
+                            user_name=display_name, history=history, skill_id=skill_id,
+                        ):
+                            out = dict(ev)
+                            out["run_id"] = run_id
+                            await _send_ev(out)
+                            if ev.get("type") == "final":
+                                final_reply = ev.get("reply") or ""
+                            if ev.get("type") == "loop_detected":
+                                loop_detected = True
                     if not loop_detected:
                         async with SessionLocal() as pdb:
                             await msg_repo.upsert_user_message(
@@ -134,25 +146,46 @@ async def ws_chat(websocket: WebSocket):
                                 seq=assistant_seq,
                             )
                             await pdb.commit()
-                        await websocket.send_json({
+                        await _send_ev({
                             "type": "done",
                             "run_id": run_id,
                             "user_message_id": client_msg_id,
                             "assistant_message_id": assistant_id,
                         })
                         return
-                    await websocket.send_json({"type": "done", "run_id": run_id})
+                    await _send_ev({"type": "done", "run_id": run_id})
                 except asyncio.CancelledError:
+                    # 任务被取消（整体超时 / 用户停止 / 连接关闭）：必须尽力给前端
+                    # 补发终止事件，否则前端永远停在「正在操作…」（历史 bug）。
+                    try:
+                        await asyncio.wait_for(websocket.send_json({
+                            "type": "timeout",
+                            "run_id": run_id,
+                            "message": "本次任务被中断，请回复「继续」从中断处接着执行。",
+                        }), 5)
+                    except Exception:
+                        pass
                     raise
-                except Exception:
+                except TimeoutError:
+                    # 消费级看门狗兜底超时（chat_stream 内部超时失效时走到这里）
+                    logger.warning("[WS] 消费级看门狗超时 user=%s run=%s", user_id, run_id)
+                    await _send_ev({
+                        "type": "timeout",
+                        "run_id": run_id,
+                        "message": "本次任务超时了：请回复「继续」从中断处接着执行。",
+                    })
+                except Exception as e:
+                    # 记录完整异常栈用于后端诊断；对前端仅返回简短、安全的异常摘要（不含栈）
                     logger.exception("[WS] agent 运行异常 user_id=%s run_id=%s", user_id, run_id)
                     try:
-                        await websocket.send_json({
+                        await _send_ev({
                             "type": "error",
                             "message": "服务器开小差了，请稍后再试",
+                            "detail": str(e)[:1000],
                             "run_id": run_id,
                         })
                     except Exception:
+                        # 若发送给前端失败，忽略（后续 finally 会清理任务）
                         pass
                 finally:
                     active_tasks.pop(run_id, None)
@@ -251,10 +284,15 @@ async def ws_chat(websocket: WebSocket):
                     await websocket.send_json({"type": "error", "message": "未知消息类型"})
         except WebSocketDisconnect:
             return
-        except Exception:
+        except Exception as e:
             logger.exception("[WS] 聊天处理异常 user_id=%s", user_id)
             try:
-                await websocket.send_json({"type": "error", "message": "服务器开小差了，请稍后再试"})
+                # 给前端返回可读的短异常摘要（截断），便于排查重复出现的错误原因。
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "服务器开小差了，请稍后再试",
+                    "detail": str(e)[:1000],
+                })
             except Exception:
                 pass
         finally:

@@ -1,11 +1,14 @@
-.venv
-__pycache__
-*.pyc
-*.pyo
+# docker build 上下文裁剪：只带后端源码进镜像（core/prompts 下的 .md 是 Agent 提示词，必须保留）
 .git
-.gitignore
+.venv
 .env
+.workbuddy
+.codebuddy
+__pycache__
+**/__pycache__
+*.pyc
 data
 frontend
 src-tauri
-*.md
+updates
+.pytest_cache

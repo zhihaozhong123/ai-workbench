@@ -8,7 +8,6 @@
 //
 // 手机/局域网访问时请把地址设为电脑的局域网 IP，例如：
 //   http://192.168.1.50:8000
-// 同时后端需监听 0.0.0.0（docker 部署下 nginx 已对外发布 :8000）。
 
 const STORAGE_KEY = 'xst_api_base'
 const DEFAULT_BASE = 'http://127.0.0.1:8000'

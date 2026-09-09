@@ -19,9 +19,9 @@ from datetime import datetime, timezone
 import chromadb
 from infra.embeddings import get_chroma_embed_fn
 from config import settings
-from observability.logging_config import get_logger
+import logging
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # 冷存储后端：仅 PostgreSQL（已移除 SQLite 回退）。
 # psycopg 同步连接需要去掉 SQLAlchemy 的 +asyncpg 方案标识，故转换为同步连接串。

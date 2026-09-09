@@ -41,9 +41,9 @@ from core.memory.long_term import init_long_term_memory
 from skills.manifest import SkillError, load_manifest
 from skills.runtime import run_skill_cli
 
-from observability.logging_config import get_logger
+import logging
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 from config import settings
 
@@ -78,6 +78,133 @@ def _tool_key(tools) -> tuple:
 
 
 _AGENT_CACHE: dict[tuple, Any] = {}
+
+
+# 明确属于「非公众号文章」的普通交付物（邮件/周报/PPT/代码等）。技能专属会话里若命中这些词，
+# 说明用户要写的是别的东西而不是公众号文章——除非句中同时带有公众号写作语境词。
+_NON_ARTICLE_DELIVERABLE_PATTERNS = (
+    r"邮件", r"周报", r"日报", r"月报", r"周记", r"日记", r"检讨书", r"请假条",
+    r"道歉信", r"感谢信", r"求职信", r"简历", r"招聘", r"合同", r"协议", r"发票",
+    r"演讲稿", r"主持稿", r"新闻稿", r"通讯稿", r"会议纪要", r"发言稿",
+    r"述职报告", r"汇报材料", r"工作方案", r"项目计划", r"操作手册", r"接口文档",
+    r"代码", r"程序", r"bug",
+    r"朋友圈", r"小红书", r"微博", r"抖音", r"快手", r"短视频",
+    r"ppt", r"演示文稿", r"word", r"excel", r"表格",
+)
+# 公众号写作语境提示词：命中则大概率仍属「写公众号文章」（如「把这篇周报分析发成公众号文章」）。
+_ARTICLE_CONTEXT_HINT_PATTERNS = (
+    r"公众号", r"文章", r"微信", r"图文", r"正文", r"排版", r"草稿", r"发布",
+    r"素材", r"群发", r"mp\.weixin", r"标题",
+)
+
+
+def _is_article_intent(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    patterns = [
+        r"写一篇",
+        r"帮我写",
+        r"标题为",
+        r"写一篇关于",
+        r"写一篇以",
+        r"发公众号",
+        r"发到公众号",
+        r"发布到公众号",
+        r"发到微信",
+        r"发公众号",
+        r"生成一篇公众号",
+        r"公众号文章",
+        r"写篇文章",
+    ]
+    has_write_signal = False
+    for p in patterns:
+        if re.search(p, t, flags=re.I):
+            has_write_signal = True
+            break
+    if not has_write_signal and not re.search(
+        r"write (an |a )?article|wechat|public account", t, flags=re.I
+    ):
+        return False
+    # 命中明确「非公众号交付物」且没有公众号语境 → 普通聊天（邮件/周报/PPT/简历等），
+    # 交给普通 agent 分支回答，不被公众号写作流程抢占。
+    if not any(re.search(p, t, flags=re.I) for p in _ARTICLE_CONTEXT_HINT_PATTERNS):
+        if any(re.search(p, t, flags=re.I) for p in _NON_ARTICLE_DELIVERABLE_PATTERNS):
+            return False
+    return True
+
+
+def _extract_title(text: str) -> str | None:
+    if not text:
+        return None
+    t = text.strip()
+
+    candidates = [
+        r"(?:标题|题目|主题)(?:[:：\s]|为|是)*([^，,。！？\n]{2,120})",
+        r"(?:标题|题目|主题)\s*(?:为|是)\s*([^，,。！？\n]{2,120})",
+        r"写(?:一篇|篇)?(?:关于|以)?\s*([^，,。！？\n]{2,120})",
+        r"帮我写(?:一篇|篇)?(?:关于|以)?\s*([^，,。！？\n]{2,120})",
+    ]
+    for pat in candidates:
+        m = re.search(pat, t, flags=re.I)
+        if m:
+            value = m.group(1).strip()
+            if value and value not in {"文章", "公众号", "公众号文章", "文章标题"}:
+                return value
+
+    m = re.search(r"(?:主题|方向)\s*为\s*([^，,。！？\n]{2,120})", t, flags=re.I)
+    if m:
+        value = m.group(1).strip()
+        if value:
+            return value
+    return None
+
+
+def _extract_wordcount(text: str) -> str | None:
+    if not text:
+        return None
+    m = re.search(r"(\d+\s*[-至–~~]\s*\d+\s*字|\d+\s*字)", text)
+    if m:
+        return m.group(0)
+    m2 = re.search(r"(\d{2,4})\s*字", text)
+    if m2:
+        return m2.group(1) + "字"
+    return None
+
+
+# 用户「明确认可并让我开始」的确认词表（需求：回复 执行/开始/正确/对/做吧 等才启动自动化）。
+# 强确认词：即便句中带否定修饰也视为确认（如「不要改，直接执行」）；
+# 弱确认词：需整句无否定/更正/礼貌收尾成分才算确认（避免「可以吗」「先别，再想想」「好的谢谢」误触发）。
+_STRONG_CONFIRM_WORDS = (
+    "执行", "开始吧", "开始做", "确认", "做吧", "动手吧", "开干", "就这么办", "就这么做",
+    "confirm", "start", "go", "yes", "sure",
+)
+_WEAK_CONFIRM_WORDS = (
+    "对", "可以", "行", "正确", "没问题", "就这样", "是的", "没错", "那就这样", "好的",
+    "好", "嗯", "ok", "okay",
+)
+_NEGATION_WORDS = (
+    "不", "别", "不要", "先别", "先不", "暂", "等等", "稍等", "再想想", "待定", "再说",
+    "谢谢", "但是", "不过", "还要", "再改", "改成", "吗",
+)
+_CONFIRM_CACHE: dict[str, bool] = {}
+
+
+def _is_confirmed_text(text: str) -> bool:
+    if not text:
+        return False
+    if text in _CONFIRM_CACHE:
+        return _CONFIRM_CACHE[text]
+    t = text.strip()
+    res = False
+    if re.search(r"(?:%s)" % "|".join(_STRONG_CONFIRM_WORDS), t, flags=re.I):
+        res = True
+    elif not re.search(r"(?:%s)" % "|".join(_NEGATION_WORDS), t, flags=re.I):
+        res = bool(re.search(r"(?:%s)" % "|".join(_WEAK_CONFIRM_WORDS), t, flags=re.I))
+    if len(_CONFIRM_CACHE) >= 512:
+        _CONFIRM_CACHE.clear()
+    _CONFIRM_CACHE[text] = res
+    return res
 
 
 async def _get_agent(tools: list):
@@ -124,6 +251,13 @@ def _build_skill_cli_tool(manifest):
 
     @lc_tool(tool_name, description=description)
     async def _invoke(params: dict) -> str:
+        # Fail-safe: only allow the deterministic skill CLI to run when caller explicitly sets confirmed=True
+        # This prevents accidental execution when the conversation hasn't received user's explicit confirmation.
+        try:
+            if not params or not params.get("confirmed"):
+                return "[ERROR] 未经确认，拒绝执行自动化操作。请先确认写作要素并回复“确认”。"
+        except Exception:
+            return "[ERROR] 参数校验失败，拒绝执行自动化操作。"
         result = await run_skill_cli(
             _skill_dir_path(manifest.slug), manifest, params or {}, user_id=_CURRENT_USER.get() or ""
         )
@@ -193,33 +327,143 @@ async def load_skill_context(user_id: str, slug: str) -> dict | None:
             f"{manifest.system_prompt}"
         ).strip(),
         "tool": tool,
+        # 技能声明 local_control 权限时，技能任务额外注入本机控制工具
+        # （open_webpage / run_apple_script 等），供浏览器自动化类技能使用。
+        "local_control": "local_control" in (manifest.permissions or []),
     }
 
 
 async def _prepare_run(user_id: str, skill_id: str, history, message: str):
-    """组装本次运行的 (工具集, 输入消息, 是否技能任务)。
+    """组装本次运行的 (工具集, 输入消息, 是否技能执行模式)。
 
-    技能任务：仅注入通用子集工具 + 该技能 CLI 工具，并把技能说明作为
-    SystemMessage 置于上下文最前；通用任务保持原行为（全部内置工具）。
+    技能专属会话采用「普通对话 → 需求澄清 → 确认执行」三态分流：
+
+    1) 普通对话：历史与当前消息都不含「写公众号文章」意图时，与普通 agent 一样正常聊天
+       —— 不注入技能系统提示，也不启用浏览器自动化 / 技能 CLI 工具（需求 1、2）；
+    2) 需求澄清：处于写作语境、但用户尚未明确确认最终方案时，注入技能手册（AGENT.md），
+       由 Agent 引导澄清 标题/主题、目标字数、排版（四套模板选一）、正文载体（Markdown/HTML），
+       并把理解到的完整方案总结给用户确认；本阶段不注入浏览器自动化工具，物理上杜绝误执行；
+    3) 确认执行：写作语境 + 已明确标题/主题 + 用户本轮以确认词（执行/开始/对/做吧/可以/没问题…）认可
+       → 注入完整技能上下文（含 local_control 浏览器自动化与技能 CLI），由 Agent 开始执行。
     """
     history = list(history or [])
+    # 会话未绑定技能 → 按通用助手行为
     if not skill_id:
         return _get_tools(), history + [HumanMessage(content=message)], False
 
-    tools = list(_COMMON_TOOLS)
+    # 把历史与当前消息合并，支持用户分多轮提供信息、以及“仅回复确认词”的语境判断
+    def _concat_history_text(hist, current_msg: str) -> str:
+        parts = []
+        for h in hist or []:
+            try:
+                c = getattr(h, "content", None)
+                if c:
+                    parts.append(str(c))
+                else:
+                    parts.append(str(h))
+            except Exception:
+                parts.append(str(h))
+        if current_msg:
+            parts.append(current_msg)
+        return "\n".join(parts)
+
+    combined = _concat_history_text(history, message)
+
+    # 1) 无写作意图（历史 + 当前均不涉及）→ 普通聊天，等同通用 agent
+    if not _is_article_intent(combined):
+        return _get_tools(), history + [HumanMessage(content=message)], False
+
+    # 写作语境：标题/主题、是否本轮明确确认（只认本轮确认词，避免回溯历史误判）
+    title = (_extract_title(combined) or "").strip()
+    confirmed = _is_confirmed_text(message)
+
+    # 2) 加载技能手册（磁盘 manifest/AGENT.md 实时读取；失败按普通助手兜底）
     ctx = await load_skill_context(user_id, skill_id)
-    msgs: list = []
-    if ctx:
+    if not ctx:
+        return _get_tools(), history + [HumanMessage(content=message)], False
+
+    # 3) 确认执行模式：标题/主题明确 + 用户本轮确认
+    if title and confirmed:
+        tools = list(_COMMON_TOOLS)
+        msgs: list = []
         if ctx.get("prompt"):
             msgs.append(SystemMessage(content=ctx["prompt"]))
         if ctx.get("tool"):
             tools.append(ctx["tool"])
-    else:
-        msgs.append(SystemMessage(
-            content="当前技能暂时不可用（可能未安装、安装失败或本地文件缺失）。"
-                    "请按通用助手方式回答用户，并提醒可到「技能市场」重新安装或稍后重试。"
-        ))
-    return tools, msgs + history + [HumanMessage(content=message)], True
+        if ctx.get("local_control"):
+            tools.extend(list(_GENERAL_EXTRA_TOOLS))
+        wordcount = _extract_wordcount(combined)
+        if re.search(r"markdown|\bmd\b", combined, flags=re.I):
+            detected_format = "Markdown"
+        elif re.search(r"\bhtml\b", combined, flags=re.I):
+            detected_format = "HTML"
+        else:
+            detected_format = ""
+        params = {
+            "title": title,
+            "format": detected_format or "Markdown",
+            "wordcount": wordcount or "",
+            "confirmed": True,
+        }
+        msgs.append(SystemMessage(content=(
+            "用户已确认开始执行。请以 ReAct 方式推进整段流程：先思考本步应调用哪个工具、预期读到什么回执，"
+            "再调用工具；**每一步都以工具的真实回执为准决定下一步**，绝不跳过步骤，也绝不编造"
+            "“已打开/已输入/已保存”等结果。\n"
+            "开始前若需要回顾该用户的公众号偏好（惯用排版模板 / 字数 / 公众号账号 / 写作风格），"
+            "可先调用 recall_from_memory 取用（本系统每轮也自动注入了该用户的画像，直接采用即可），"
+            "让正文与排版贴合其偏好；正文主题若涉及需核实的最新资料且用户允许联网，可用 web_search，"
+            "用户没要求时直接按已确认方案写作。\n"
+            "先回复用户一句「好的，现在就马上开始做。」，"
+            "然后立即按手册「执行流程」推进（打开公众号平台 → 核对登录态 → 新建图文 → 填标题 → 写正文 → 存草稿），"
+            "每完成一步先读回/核对结果再进入下一步，执行过程中遵循手册全部硬性规则"
+            "（标题 ≤64 字、正文绝不进标题框、只点保存草稿、未登录停下等用户扫码等）。\n"
+            "提示：若你此前已给用户拟出候选标题而用户没有特别指定，直接默认采用你的首选推荐标题，"
+            "无需再就标题二次征求意见。\n"
+            "若你决定调用技能确定性工具 skill_wechat_article_publish，必须以 JSON 参数传入以下内容，"
+            "且 confirmed 必须为 true（可按对话最新共识调整其中字段）：\n"
+            + json.dumps(params, ensure_ascii=False)
+        )))
+        return tools, msgs + history + [HumanMessage(content=message)], True
+
+    # 4) 澄清模式：写作语境但尚未到执行门（缺标题 / 未确认 / 用户还在补充信息）
+    gaps = []
+    if not title:
+        gaps.append("文章标题（若未定，可先给主题/方向，由你来拟定候选标题）")
+    if not _extract_wordcount(combined):
+        gaps.append("目标字数")
+    stage_note = ""
+    if gaps:
+        stage_note = "当前对话中还缺少：" + "、".join(gaps) + "，请优先补全。\n"
+    stage_prompt = (
+        "你现在处于「公众号写作需求澄清」环节：尚未执行任何浏览器操作，本环节未启用浏览器自动化与"
+        "技能 CLI 工具（open_webpage / run_apple_script / skill_wechat_article_publish 均不可用），"
+        "因此不要宣称能打开网页、也不要调用不存在的工具；除此之外，你的思考与其它工具能力完全正常——\n"
+        "像平时一样先思考、再行动、后开口（ReAct）：需要核实写作主题涉及的最新事实/资料时可调用 "
+        "web_search 查证后再拟候选标题或大纲；需要回顾该用户的历史公众号偏好（惯用排版 / 字数 / 账号 / 写作风格）"
+        "时可调用 recall_from_memory（每轮系统也已自动注入该用户画像，优先直接采用）；需要计算/时间时用 "
+        "calculator / get_current_time。\n"
+        "请按上方技能手册行事：\n"
+        "1) 用户当前消息若不是「写公众号文章」业务（例如闲聊、身份/能力询问、查询、周报邮件 PPT 等其它任务）\n"
+        "   → 与普通智作台 agent 完全一致地自然回答即可，不套技能话术、不追问写作要素；\n"
+        "2) 若是写公众号文章 → 逐项与用户澄清：\n"
+        "   ① 标题：用户已给则采用；只给了方向/主题则你主动拟定候选标题（可给 2～3 个供其选择或直接推荐一个）；\n"
+        "   ② 目标字数：问清或按语境建议一个明确的字数/区间；\n"
+        "   ③ 排版：从技能手册给出的四套排版模板中推荐一套并请用户选择（或直接按文章语境选定一套并说明）；\n"
+        "   ④ 正文载体：Markdown 或 HTML（默认 Markdown）。\n"
+        f"{stage_note}"
+        "记忆协作：当用户明确表达**可复用的公众号偏好**（例如「以后都用 C 模板」「我一般写 1500 字」"
+        "「固定发在 XX 公众号」「我喜欢这种风格」）→ 主动调用 save_to_memory 保存。记忆按当前登录用户"
+        "（多租户）自动隔离，安全可靠不会与其它用户串号；仅为本次文章做的临时选择（如本次排版用 A）不必保存。\n"
+        "每当用户补充信息或提出更正，都要用自然、简短的语言重述你对这篇完整写作方案的理解"
+        "（标题 / 字数 / 排版 / 载体格式），并请用户确认；只有用户明确回复“执行 / 开始 / 对 / 可以 / 做吧 / 没问题”等确认词，"
+        "才能进入执行。用户更正时不要不耐烦，反复核对直到一致。"
+    )
+    msgs: list = []
+    if ctx.get("prompt"):
+        msgs.append(SystemMessage(content=ctx["prompt"]))
+    msgs.append(SystemMessage(content=stage_prompt))
+    tools = list(_COMMON_TOOLS)
+    return tools, msgs + history + [HumanMessage(content=message)], False
 
 
 async def get_context_messages(
@@ -310,7 +554,7 @@ async def chat(
             "run_id": thread_id,
             "user_id": user_id,
             "user_name": user_name,
-            "recursion_limit": 12,
+            "recursion_limit": 30,
         }
     }
     try:
@@ -366,7 +610,7 @@ async def chat_stream(
             "run_id": thread_id,
             "user_id": user_id,
             "user_name": user_name,
-            "recursion_limit": 12,
+            "recursion_limit": 30,
         }
     }
     n_before = len(input_messages)

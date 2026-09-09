@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import Column, String, Integer, DateTime, Boolean, Float, Text, UniqueConstraint, text
@@ -7,8 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import declarative_base
 
 from config import settings, _pg_url
-from observability.logging_config import get_logger
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 Base = declarative_base()
 

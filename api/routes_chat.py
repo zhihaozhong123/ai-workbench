@@ -7,14 +7,15 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
+import logging
+
 from infra.db import Conversation, SessionLocal, get_db
 from infra.schemas import ChatRequest, ChatResponse
 import core.agent_runner as agent_runner
-from observability.logging_config import get_logger
 from api.deps import get_current_user
 
 router = APIRouter(prefix="/api", tags=["聊天"])
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def _utcnow():

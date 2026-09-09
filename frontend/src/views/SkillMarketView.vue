@@ -278,6 +278,9 @@ async function doInstall(skill) {
     const { data } = await installSkill(skill.slug)
     toast(data.upgrade ? `已升级「${skill.name}」` : `技能「${skill.name}」安装成功，可去对话任务使用`)
     await load()
+    // 同步刷新全局 store 中的已安装技能列表，确保对话任务页即时感知变化
+    const chat = useChatStore()
+    await chat.loadInstalledSkills()
   } catch (e) {
     toast(e?.response?.data?.detail || '安装失败，请稍后重试', 'err')
     await load()
@@ -303,6 +306,9 @@ async function doUninstall() {
     confirmSkill.value = null
     toast(`技能「${skill.name}」已卸载`)
     await load()
+    // 同步刷新全局 store 中的已安装技能列表，确保对话任务页即时移除该技能入口
+    const chat = useChatStore()
+    await chat.loadInstalledSkills()
   } catch (e) {
     toast(e?.response?.data?.detail || '卸载失败，请稍后重试', 'err')
   } finally {

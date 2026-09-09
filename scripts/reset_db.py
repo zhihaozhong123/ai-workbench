@@ -22,9 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import text
 
 from infra.db import engine
-from observability.logging_config import get_logger
+import logging
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # 业务表 + LangGraph checkpoint 表（Agent 对话状态）。checkpoint_blobs /
 # checkpoint_writes 通过外键关联 checkpoints，TRUNCATE ... CASCADE 会一并级联清空。

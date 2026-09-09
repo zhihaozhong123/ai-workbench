@@ -138,15 +138,55 @@ def parse_frontmatter(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _extract_skillmd_body(raw: str) -> str:
+    """提取 SKILL.md 中 frontmatter 之后的正文部分。"""
+    if not raw.startswith("---"):
+        return raw.strip()
+    end = raw.find("\n---", 3)
+    if end < 0:
+        return ""
+    return raw[end + 4:].strip()
+
+
 def _read_skillmd_manifest(skill_root: Path) -> dict:
-    """把 SKILL.md frontmatter 映射成与 manifest.json 等价的扁平 dict。"""
+    """把 SKILL.md frontmatter 映射成与 manifest.json 等价的扁平 dict。
+
+    同时提取 SKILL.md 正文作为 ``system_prompt``。若 frontmatter 声明了
+    ``references`` 列表（编排型技能引用外部子技能文件），会读取每个引用
+    文件的内容拼接到 ``system_prompt`` 末尾，实现"引用而非内联"。
+    """
     md_file = skill_root / SKILL_MD_FILE
     if not md_file.exists():
         raise SkillError(
             f"不是有效的技能包：{skill_root.name} 目录下既没有 {MANIFEST_FILE} 也没有 {SKILL_MD_FILE}"
         )
-    fm = parse_frontmatter(md_file.read_text(encoding="utf-8")) or {}
-    return {
+    raw = md_file.read_text(encoding="utf-8")
+    fm = parse_frontmatter(raw) or {}
+    body = _extract_skillmd_body(raw)
+
+    # 支持 references（编排型技能引用外部子技能文件）
+    refs = _pick(fm, "references")
+    if isinstance(refs, list) and refs:
+        ref_parts = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            ref_path_raw = ref.get("path", "")
+            if not ref_path_raw:
+                continue
+            ref_path = (skill_root / ref_path_raw).resolve()
+            if ref_path.is_file():
+                ref_content = ref_path.read_text(encoding="utf-8").strip()
+                # 去掉子技能自身的 frontmatter，只取正文
+                ref_fm = parse_frontmatter(ref_content)
+                if ref_fm is not None:
+                    ref_content = _extract_skillmd_body(ref_content)
+                section = ref.get("section") or ref_path_raw
+                ref_parts.append(f"\n{'='*60}\n# 引用技能：{section}\n{'='*60}\n\n{ref_content}")
+        if ref_parts:
+            body = f"{body}\n\n{''.join(ref_parts)}" if body else "".join(ref_parts)
+
+    result = {
         "slug": _pick(fm, "metadata.openclaw.slug", "metadata.slug", "slug"),
         "name": _pick(fm, "name"),
         "version": _pick(fm, "metadata.openclaw.version", "metadata.version", "version"),
@@ -155,7 +195,20 @@ def _read_skillmd_manifest(skill_root: Path) -> dict:
         "emoji": _pick(fm, "metadata.openclaw.emoji", "metadata.emoji", "emoji"),
         "category": _pick(fm, "metadata.openclaw.category", "metadata.category", "category"),
         "homepage": _pick(fm, "homepage", "repository"),
+        "system_prompt": body,
     }
+
+    # 透传 permissions（local_control 等）
+    perms = _pick(fm, "permissions")
+    if isinstance(perms, list):
+        result["permissions"] = perms
+
+    # 透传 runtime（entry / cli / env_whitelist / timeout_seconds）
+    runtime = _pick(fm, "runtime")
+    if isinstance(runtime, dict):
+        result["runtime"] = runtime
+
+    return result
 
 
 def _apply_defaults(m: dict) -> dict:

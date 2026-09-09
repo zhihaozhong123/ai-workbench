@@ -22,10 +22,10 @@ import sys
 from pathlib import Path
 
 from config import settings
-from observability.logging_config import get_logger
+import logging
 from skills.manifest import SkillManifest, SkillError, safe_entry_path
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # 子进程基础环境白名单：仅这些系统变量 + 技能 manifest 声明的 env_whitelist
 _BASE_ENV_KEYS = (

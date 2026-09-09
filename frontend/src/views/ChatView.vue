@@ -35,7 +35,7 @@
             <span class="conv-title">{{ c.title || '新对话' }}</span>
           </div>
         </template>
-        <div v-if="!conversations.length" class="conv-empty">暂无会话</div>
+        <div v-if="!filteredConversationCount" class="conv-empty">暂无会话</div>
       </div>
 
     </aside>
@@ -66,7 +66,7 @@
           :key="i"
           :class="['msg', m.role === 'user' ? 'msg-user' : 'msg-bot']"
         >
-          <div class="msg-avatar">{{ m.role === 'user' ? '🌳' : '🤖' }}</div>
+          <div class="msg-avatar">{{ m.role === 'user' ? userAvatarText : botAvatarText }}</div>
 
           <template v-if="m.role === 'user'">
             <div class="msg-user-col">
@@ -152,10 +152,10 @@
           <template v-else>
             <div class="msg-bot-col">
               <div class="msg-body">
-                <!-- 思考中 / 工具执行中：根据工具状态显示不同提示 -->
+                <!-- 思考中 / 工具执行中：根据工具状态显示不同提示（≥10s 显示已耗时） -->
                 <div v-if="m.thinking" class="typing">
                   <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-                  <span class="tool-info">{{ toolStatusText(m) }}</span>
+                  <span class="tool-info">{{ toolStatusText(m) }}<template v-if="thinkElapsed(m) >= 10"> · 已 {{ thinkElapsed(m) }} 秒</template></span>
                 </div>
                 <!-- 工具结果摘要（仅在 final 前收到 tool_result 时短暂展示） -->
                 <div v-else-if="m.toolStatus && !m.content" class="typing tool-result-summary">
@@ -201,9 +201,12 @@
           @keydown.enter.exact.prevent="onEnter"
         ></textarea>
         <!-- 发送 / 停止 共用同一个按钮：未在生成时为「发送」(向上箭头)，
-             生成中时切换为「停止」(圆角方块)，互斥显示，避免出现两个按钮。 -->
+             生成中时切换为「停止」(圆角方块)，互斥显示，避免出现两个按钮。
+             注意「生成中」= 后端 agent 运行中(isStreaming) 或 前端打字机仍在播放(anyTyping)：
+             final/done 事件到达后 activeRuns 即被清空，但打字机还要播好几秒，
+             若只看 isStreaming，按钮会在打字机播放期间提前变回「发送」。 -->
         <button
-          v-if="isStreaming"
+          v-if="isStreaming || anyTyping"
           class="action-btn stop-btn"
           @click="stop"
           title="停止生成"
@@ -246,7 +249,6 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useChatStore } from '@/stores/chat'
 import api from '@/api/client'
-import { fetchInstalled } from '@/api/skills'
 import TaskCard from '@/components/TaskCard.vue'
 
 const auth = useAuthStore()
@@ -258,15 +260,37 @@ const messagesEl = ref(null)
 const editingIndex = ref(-1)
 const editingText = ref('')
 const copiedIndex = ref(-1)
+
+// 思考耗时计时：每 5s 心跳一次，驱动「已 N 秒」显示（长任务等待可感知）
+const nowTick = ref(Date.now())
+let thinkTimer = null
+
+/** 当前气泡已思考秒数（懒初始化起点；≥10s 才显示，短回复不打扰） */
+function thinkElapsed(m) {
+  if (!m._thinkStart || m._thinkStart > Date.now()) m._thinkStart = Date.now()
+  return Math.max(0, Math.round((nowTick.value - m._thinkStart) / 1000))
+}
 const editWidth = ref(0)   // 编辑框宽度：动态跟随紧随的 agent 回复气泡宽度
 
-// ---- 技能任务（已安装技能 → 专属任务入口）----
-const installedSkills = ref([])
-const installedMap = computed(() => {
-  const m = {}
-  for (const s of installedSkills.value) m[s.slug] = s
-  return m
-})
+// 用 storeToRefs 解构，保证模板中的响应式
+const {
+  conversations,
+  currentId,
+  messages,
+  wsOpen,
+  isStreaming,
+  pendingIndex,
+  installedSkills,
+  installedMap,
+  installedSlugs,
+} = storeToRefs(store)
+
+/** 前端打字机是否仍在播放（存在 playing 态的 assistant 气泡）。
+ *  与 isStreaming（后端 agent 运行中）互补：final 之后 done 会清空 activeRuns，
+ *  但打字机还在逐字播放，这期间停止按钮也必须保持可见、可点击。 */
+const anyTyping = computed(
+  () => messages.value.some((m) => m.role === 'assistant' && m.playing)
+)
 
 /** 当前会话是否为某技能的专属会话 */
 const currentSkillSlug = computed(() => {
@@ -274,10 +298,14 @@ const currentSkillSlug = computed(() => {
   return (cur && cur.skill_id) || ''
 })
 
-/** 顶栏展示的当前技能（卸载后回退用会话标题，避免空指针） */
+/** 顶栏展示的当前技能：仅在「该技能仍处于已安装」时展示，避免卸载后顶栏出现幽灵技能徽标。
+ *  卸载后顶栏回到普通模式（智作台 · 对话任务），同时 sessions 中该技能的会话也会被过滤掉，
+ *  避免出现「对话消息区域在渲染已卸载技能的内容、但左侧任务列表却不显示该技能」的不一致。 */
 const activeSkill = computed(() => {
   const slug = currentSkillSlug.value
   if (!slug) return null
+  // 若该技能已不在 installedSlugs 中，则视为已卸载，不再展示顶栏技能徽标
+  if (!installedSlugs.value.has(slug)) return null
   const conv = conversations.value.find((c) => c.conversation_id === currentId.value)
   const inst = installedMap.value[slug]
   return {
@@ -292,15 +320,20 @@ function skillEmojiOf(c) {
   return (s && s.emoji) || '🧩'
 }
 
-async function loadInstalledSkills() {
-  try {
-    const { data } = await fetchInstalled()
-    // 任务入口仅展示「状态正常」的技能；失败的由技能市场引导重试
-    installedSkills.value = (data.skills || []).filter((s) => s.status === 'ok')
-  } catch (e) {
-    console.error('加载已安装技能失败', e)
-  }
-}
+/** 用户消息头像：中文昵称取第一个字、英文昵称取大写首字母；都没取到时回退"我" */
+const userAvatarText = computed(() => {
+  const u = auth.user || {}
+  const raw = u.nickname || u.username || '我'
+  const ch = raw[0]
+  if (!ch) return '我'
+  // 拉丁字母 → 大写首字母；中文/其它文字保持原样
+  return /[A-Za-z]/.test(ch) ? ch.toUpperCase() : ch
+})
+
+/** bot 消息头像：
+ *  - 当前会话是某技能专属会话 → 用该技能的 emoji（与技能市场/任务卡片一致）；
+ *  - 普通智作台会话 → 显示"智"字（平台标识）。 */
+const botAvatarText = computed(() => (activeSkill.value ? activeSkill.value.emoji || '🧩' : '智'))
 
 /** 点击技能任务卡片：创建/复用该技能的专属会话并打开 */
 async function openSkillTask(skill) {
@@ -320,16 +353,6 @@ async function openSkillTask(skill) {
   }
 }
 
-// 用 storeToRefs 解构，保证模板中的响应式
-const {
-  conversations,
-  currentId,
-  messages,
-  wsOpen,
-  isStreaming,
-  pendingIndex,
-} = storeToRefs(store)
-
 function dayDiffFromToday(iso) {
   const d = new Date(iso)
   if (isNaN(d)) return 9999
@@ -347,7 +370,11 @@ const timeGroups = computed(() => {
     { key: 'last30', label: '过去 30 天', list: [] },
     { key: 'earlier', label: '更早', list: [] },
   ]
+  // 已卸载技能的专属会话不再展示在对话任务列表中
+  // （数据库仍保留历史会话，重新安装该技能后会重新出现在列表里）
+  const installedSet = installedSlugs.value
   for (const c of conversations.value) {
+    if (c.skill_id && !installedSet.has(c.skill_id)) continue
     const diff = dayDiffFromToday(c.updated_at)
     let b
     if (diff <= 0) b = buckets[0]
@@ -358,6 +385,17 @@ const timeGroups = computed(() => {
     b.list.push(c)
   }
   return buckets.filter((b) => b.list.length)
+})
+
+/** 过滤后剩余的会话总数（用于空态展示判断；含已卸载技能专属会话时被过滤掉） */
+const filteredConversationCount = computed(() => {
+  const installedSet = installedSlugs.value
+  let n = 0
+  for (const c of conversations.value) {
+    if (c.skill_id && !installedSet.has(c.skill_id)) continue
+    n++
+  }
+  return n
 })
 
 function selectConversation(id) {
@@ -421,9 +459,24 @@ function send() {
 }
 
 function stop() {
-  // 停止所有打字机定时器
+  // 1) 停掉所有正在播放的打字机：定格已输出的部分为「已停止」，
+  //    并把部分回复写回版本数据（Continue / 切版本都依赖它）。
+  //    需逐条处理而不能只清 typingTimers —— 否则气泡停留在 playing 态，
+  //    消息不标 stopped（Continue 按钮不出现）、部分内容也不落版本。
+  for (let i = 0; i < messages.value.length; i++) {
+    const m = messages.value[i]
+    if (m.role !== 'assistant' || !m.playing) continue
+    clearBubbleTypewriter(m)   // 清定时器 + 从 typingTimers 移除 + 置空 _typewriterTimer
+    m.playing = false
+    if (!m._frozen) {
+      m.stopped = true
+      saveCurrentReply(i)      // 已输出的部分内容存为该版本回复
+    }
+  }
+  // 2) 兜底清理可能残余的定时器（如冻结态消息的定时器）
   typingTimers.forEach((t) => clearInterval(t))
   typingTimers.length = 0
+  // 3) 取消后端仍在进行的 agent 运行（打字机阶段 activeRuns 已空，此调用无副作用）
   store.stopGenerating()
 }
 
@@ -494,7 +547,7 @@ function retryUserMsg(index) {
   // 如果后面的 bot 消息没有内容且是最后一条，复用它重新触发，不要创建新会话
   if (next && next.role === 'assistant' && !next.content && index + 1 === messages.value.length - 1) {
     next.stopped = false
-    next.thinking = true
+    next.thinking = true; next._thinkStart = Date.now()
     next.playing = false
     next.tool = ''
     next.toolStatus = ''
@@ -645,7 +698,7 @@ function regenerateBotMsg(index) {
   // 如果当前 bot 消息没有内容且是最后一条，复用它重新触发，保持在同一条会话里
   if (!m.content && index === messages.value.length - 1) {
     m.stopped = false
-    m.thinking = true
+    m.thinking = true; m._thinkStart = Date.now()
     m.playing = false
     m.tool = ''
     m.toolStatus = ''
@@ -673,7 +726,7 @@ function continueBotMsg(index) {
     // 标记 _continueFrom，playTypewriter 将不再清空已有内容
     m._continueFrom = m.content || ''
     m.stopped = false
-    m.thinking = true
+    m.thinking = true; m._thinkStart = Date.now()
     m.playing = false
     m.tool = ''
     m.toolStatus = ''
@@ -727,7 +780,7 @@ function switchVersion(userIndex, versionIndex) {
     delete assistantMsg._pendingTool   // 之前冻结期间缓存的工具名不再需要
     if (assistantMsg.runId) {
       // 仍在后台生成中：显示「思考中…」，等待 final 到来再播放，绝不显示旧的冻结内容
-      assistantMsg.thinking = true
+      assistantMsg.thinking = true; assistantMsg._thinkStart = Date.now()
       assistantMsg.playing = false
       assistantMsg.tool = ''
       assistantMsg.toolStatus = ''
@@ -781,19 +834,28 @@ function toolStatusText(m) {
   const status = m.toolStatus
   const tool = m.tool || ''
   if (status === 'success') {
-    return '操作完成，正在整理结果…'
+    return '✓ 操作完成，正在整理结果…'
   }
   if (status === 'error') {
     return '操作遇到问题，正在整理回复…'
   }
   if (status === 'calling') {
     switch (tool) {
-      case 'open_webpage': return '正在打开网页…'
-      case 'open_application': return '正在打开应用…'
-      case 'run_apple_script': return '正在执行本机脚本…'
-      case 'web_search': return '正在联网搜索…'
-      default: return '正在操作…'
+      case 'open_webpage': return '🌐 正在打开网页…'
+      case 'open_application': return '📱 正在打开应用…'
+      case 'run_apple_script': return '⚙️ 正在执行本机自动化操作…'
+      case 'web_search': return '🔍 正在联网搜索…'
+      default: return tool.startsWith('skill_') ? '🛠️ 正在执行技能工具…' : '正在操作…'
     }
+  }
+  // thinking 且无工具调用：按技能任务/普通任务给具体的阶段提示。
+  // 用户明确要求知道 agent 此刻在做什么、还要多久——不能只显示"思考中"。
+  const isSkillTask = !!currentSkillSlug.value
+  if (isSkillTask) {
+    const elapsed = thinkElapsed(m)
+    if (elapsed < 45) return '🛠️ 正在按技能要求处理任务，请稍候…'
+    if (elapsed < 100) return '🛠️ 技能任务执行中（内容生成 / 工具调用）…'
+    return '🛠️ 技能任务仍在执行（复杂任务耗时更久），请耐心等待…'
   }
   return '思考中…'
 }
@@ -971,6 +1033,9 @@ function restoreTypewriters() {
 onMounted(async () => {
   auth.hydrate()
 
+  // 思考耗时心跳：驱动「已 N 秒」显示
+  thinkTimer = setInterval(() => { nowTick.value = Date.now() }, 5000)
+
   // 强制防护：如果当前用户没有选中会话但 messages 不为空，说明有旧数据残留，彻底清空
   if (!currentId.value && messages.value.length) {
     store.resetAll()
@@ -998,7 +1063,7 @@ onMounted(async () => {
   // 加载会话列表
   await store.loadConversations()
   // 加载已安装技能 → 左侧「技能任务」入口
-  loadInstalledSkills()
+  await store.loadInstalledSkills()
 
   // 跨页跳转（如技能市场「打开任务」）请求打开的会话
   const pendingId = store.consumePendingOpen()
@@ -1016,6 +1081,8 @@ onBeforeUnmount(() => {
   // 停止所有打字机定时器（DOM 即将销毁，无法 scrollToBottom）
   typingTimers.forEach((t) => clearInterval(t))
   typingTimers.length = 0
+  // 停止思考耗时心跳
+  if (thinkTimer) { clearInterval(thinkTimer); thinkTimer = null }
 
   // 标记正在播放的消息为非播放状态（回到页面前已渲染的内容保留）
   for (const m of messages.value) {

@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import chromadb
 from config import settings
-from observability.logging_config import get_logger
+import logging
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # 与 core/memory/long_term.py 保持一致的热存储集合名
 HOT_COLLECTION = "long_term_memory_hot"

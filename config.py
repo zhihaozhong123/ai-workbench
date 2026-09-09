@@ -8,9 +8,7 @@ load_dotenv(override=False)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator
 
-# 项目根目录（config.py 位于项目根）：用于推导默认数据目录（技能安装目录等；
-# Docker 容器内 = /app/data，本地开发 = <repo>/data），与 docker-compose.yml 的
-# `app_data:/app/data` 挂载对齐。
+# 项目根目录（config.py 位于项目根）：用于推导默认数据目录（技能安装目录等）。
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -95,16 +93,12 @@ class Settings(BaseSettings):
     redis_url: str
 
     # ===== 技能平台（XST-Skill）=====
-    # 技能安装根目录：默认 <项目根>/data/skills，Docker 内即 /app/data/skills，
-    # 落在 docker-compose 的 `app_data` 共享命名卷（多副本 backend 共享同一份技能文件）。
+    # 技能安装根目录：默认 <项目根>/data/skills。
     # 技能 CLI 子进程并发由全局信号量 skills_run 控制（上限 skill_exec_max_concurrency）。
     skills_root: str = ""
     skill_exec_max_concurrency: int = 4   # 全局技能 CLI 子进程并发上限
-    skill_exec_timeout_seconds: float = 60.0  # 单个技能 CLI 调用超时上限（防失控技能占满 worker）
-
-    # ===== 审计日志 =====
-    # true 时，敏感操作（登录/注册/登出/技能安装卸载/对话）写入 audit logger。
-    audit_enabled: bool
+    # 提高默认技能 CLI 调用超时到 180s（3 分钟），与业务需求 1~3 分钟相匹配。
+    skill_exec_timeout_seconds: float = 180.0  # 单个技能 CLI 调用超时上限（防失控技能占满 worker）
 
     # ===== LLM（DeepSeek）=====
     deepseek_api_key: str

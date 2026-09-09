@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { useAuthStore } from './auth'
 import api from '@/api/client'
 import { createChatSocket } from '@/api/chat'
+import { fetchInstalled } from '@/api/skills'
 
 /**
  * 聊天 Store：管理 WebSocket 连接和消息状态。
@@ -32,6 +33,28 @@ export const useChatStore = defineStore('chat', () => {
   // ChatView onMounted 完成后消费并清除（在 Pinia 中跨路由共享）。
   const pendingSelectId = ref(null)
 
+  // ---- 已安装技能（全局共享，供 ChatView 任务入口与会话过滤使用） ----
+  const installedSkills = ref([])
+  const installedMap = computed(() => {
+    const m = {}
+    for (const s of installedSkills.value) m[s.slug] = s
+    return m
+  })
+  const installedSlugs = computed(() => {
+    const set = new Set()
+    for (const s of installedSkills.value) set.add(s.slug)
+    return set
+  })
+
+  async function loadInstalledSkills() {
+    try {
+      const { data } = await fetchInstalled()
+      installedSkills.value = (data.skills || []).filter((s) => s.status === 'ok')
+    } catch (e) {
+      console.error('加载已安装技能失败', e)
+    }
+  }
+
   // 根据 activeRuns 重新计算 isStreaming 与 pendingIndex，保证二者与运行表一致
   function refreshStreaming() {
     const ids = Object.keys(activeRuns)
@@ -50,8 +73,12 @@ export const useChatStore = defineStore('chat', () => {
 
   // ---- 初始化 WebSocket ----
   function initSocket() {
-    // token 变更（注销后重登）：关闭旧 socket 重建，并清除旧用户所有数据防止串号
-    if (socket && socket._token !== auth.accessToken) {
+    // 用户变更（注销后重登另一账号）：关闭旧 socket 重建，并清除旧用户所有数据防止串号。
+    // ⚠️ 必须比对「用户身份」而非 token 字符串：同一用户的 access token 每 15 分钟
+    // 会被 axios 静默刷新一次，刷新后 token 字符串必然不同，但 WS 连接依然有效，
+    // 绝不能因此重建 socket / 清空会话数据。
+    const curUserId = auth.user?.user_id || null
+    if (socket && socket._userId && curUserId && socket._userId !== curUserId) {
       closeSocket()
       conversations.value = []
       currentId.value = null
@@ -68,15 +95,44 @@ export const useChatStore = defineStore('chat', () => {
       socket = createChatSocket({
         onOpen: () => {
           wsOpen.value = true
+          // 连接（含 1008 过期后换 token 重连、3s 断线重连）建立时同步记录：
+          // token 可能已被 axios 静默刷新（同一用户），WS 建连用的就是最新 token
+          if (socket) {
+            socket._token = auth.accessToken
+            socket._userId = auth.user?.user_id || null
+          }
           loadConversations()
         },
         onClose: () => {
           wsOpen.value = false
+          // 连接断开：后端 ws_chat 的 finally 会取消所有进行中的运行，
+          // 且这些运行不会再发出任何事件（连接已死）。
+          // 必须本地收尾所有 live 气泡，否则它们永远停留在「思考中」
+          // （历史 bug：后端重启/网络断开杀死运行后无终止事件，前端假死）。
+          const ids = Object.keys(activeRuns)
+          for (const rid of ids) {
+            const m = messages.value[activeRuns[rid]]
+            if (m) {
+              m.thinking = false
+              m.playing = false
+              m.tool = ''
+              m.toolStatus = ''
+              m.toolResult = ''
+              m.runId = null
+              if (!m.content && !m._fullReply) {
+                m.stopped = true
+                m.content = '⚠️ 连接中断，本次任务已停止。回复「继续」可从中断处接着执行。'
+              }
+            }
+            delete activeRuns[rid]
+          }
+          refreshStreaming()
         },
         onEvent: handleEvent,
       })
-      // 记录 socket 创建时使用的 token，用于检测 token 变更
+      // 记录 socket 归属（用户身份 + 建连时 token），用于检测用户变更
       socket._token = auth.accessToken
+      socket._userId = auth.user?.user_id || null
     } finally {
       _connecting = false
     }
@@ -167,6 +223,7 @@ export const useChatStore = defineStore('chat', () => {
     clearRuns()
     _onFinal = null
     _onDone = null
+    installedSkills.value = []
   }
 
   function createId() {
@@ -174,8 +231,35 @@ export const useChatStore = defineStore('chat', () => {
       `m_${Date.now()}_${Math.random().toString(36).slice(2)}`
   }
 
+  /** 发新消息前清理历史残留的「假死思考气泡」。
+   *  场景：某轮运行异常结束后（旧版 bug / 极端路径），气泡可能停留在
+   *  thinking 态且 runId 已不在 activeRuns——它们永远不会被任何事件收尾，
+   *  在界面上越积越多，让用户分不清「哪一轮在跑」。发新消息 = 用户开始
+   *  新交互，是清理这些尸体的最佳时机。 */
+  function _sweepStaleThinking() {
+    for (let i = 0; i < messages.value.length; i++) {
+      const m = messages.value[i]
+      if (m.role !== 'assistant' || !m.thinking) continue
+      if (m.runId && activeRuns[m.runId] !== undefined) continue   // 还在跑，不动
+      // 假死气泡：无运行对应的 thinking 态 → 标记为已中断
+      m.thinking = false
+      m.playing = false
+      m.tool = ''
+      m.toolStatus = ''
+      m.toolResult = ''
+      m.runId = null
+      if (!m.content && !m._fullReply) {
+        m.stopped = true
+        m.content = '（本轮已结束）'
+      }
+    }
+  }
+
   function sendMessage(text, extra = {}) {
     if (!text || !wsOpen.value) return false
+
+    // 清理历史残留的假死思考气泡（不让旧轮次的尸体干扰新一轮）
+    _sweepStaleThinking()
 
     // clientMsgId 绑定消息/版本；runId 绑定一次具体生成，重试时两者必须分离
     const clientMsgId = createId()
@@ -229,9 +313,13 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function handleEvent(ev) {
-    // 安全校验：如果当前 socket 的 token 与当前登录用户的 token 不一致，
-    // 说明这是旧用户 socket 的延迟事件，直接丢弃，防止串号。
-    if (socket && socket._token !== auth.accessToken) return
+    // 安全校验：仅当 socket 归属的用户与当前登录用户不一致（注销换号后旧 socket
+    // 的延迟事件）才丢弃，防止串号。
+    // ⚠️ 绝不能比对 token 字符串：同一用户 access token 每 15 分钟被 axios 静默
+    // 刷新一次，刷新后 socket._token（建连时的旧 token）≠ auth.accessToken（新
+    // token），会把本用户的全部正常事件（final/done/…）静默丢弃，气泡永远停在
+    // 「思考中/执行中」——2026-09-09「已 212 秒」假死事故的根因。
+    if (socket && socket._userId && auth.user?.user_id && socket._userId !== auth.user.user_id) return
 
     const runId = ev.run_id || null
 
@@ -310,6 +398,12 @@ export const useChatStore = defineStore('chat', () => {
         if (ev.assistant_message_id) target.message_id = ev.assistant_message_id
         // live → committed：清掉 runId，从此该消息不再接收任何流式事件
         target.runId = null
+        // 兜底：done 到达但气泡仍是 thinking 且没有任何内容（运行被取消 / 无 final
+        // 的异常结束路径）→ 清掉 thinking 标记 stopped，绝不留「永远思考中」的假死气泡
+        if (target.thinking && !target.content && !target._fullReply) {
+          target.thinking = false
+          target.stopped = true
+        }
         if (runId && activeRuns[runId] !== undefined) {
           delete activeRuns[runId]
           refreshStreaming()
@@ -322,6 +416,32 @@ export const useChatStore = defineStore('chat', () => {
         }
         if (_onDone) _onDone(targetIndex)
         else stopStreaming(targetIndex)
+        break
+      }
+      case 'timeout':
+      case 'loop_detected': {
+        // 运行异常结束（整体超时 / 重复工具调用被中断）：必须清理气泡状态，
+        // 否则 thinking 永远为 true，用户看到的是永远「思考中」的假死气泡。
+        const wasFrozen = target._frozen
+        target.thinking = false
+        target.playing = false
+        target.tool = ''
+        target.toolStatus = ''
+        target.toolResult = ''
+        if (!wasFrozen) {
+          target.content = ev.type === 'timeout'
+            ? '⏱️ 本次任务超时了：' + (ev.message || '操作或等待时间过长，请稍后重试。')
+            : '任务已中断：' + (ev.message || '检测到重复操作，已自动停止。')
+        }
+        target.runId = null
+        if (runId && activeRuns[runId] !== undefined) {
+          delete activeRuns[runId]
+          refreshStreaming()
+        }
+        if (!wasFrozen && Object.keys(activeRuns).length === 0) {
+          _onFinal = null
+          _onDone = null
+        }
         break
       }
       case 'error': {
@@ -459,6 +579,9 @@ export const useChatStore = defineStore('chat', () => {
     wsOpen,
     isStreaming,
     pendingIndex,
+    installedSkills,
+    installedMap,
+    installedSlugs,
     // socket
     initSocket,
     closeSocket,
@@ -469,6 +592,7 @@ export const useChatStore = defineStore('chat', () => {
     newConversation,
     requestOpenConversation,
     consumePendingOpen,
+    loadInstalledSkills,
     // messaging
     sendMessage,
     resendMessage,

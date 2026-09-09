@@ -4,7 +4,7 @@
 它把「通用 Agent 对话」升级为「**Agent 工作台 + 技能市场**」：开发者写好技能并发布到
 GitHub Release，用户一键安装后，就在「对话任务」里获得该技能的**专属 Agent**。
 
-- 代码/数据都在你本机；后端同样可容器化多副本部署（PostgreSQL + Redis + Chroma）。
+- 代码/数据都在你本机，存储依赖 PostgreSQL + Redis + Chroma。
 - 仅支持 macOS（本期桌面端）。
 
 ## 核心能力
@@ -45,28 +45,29 @@ GitHub Release，用户一键安装后，就在「对话任务」里获得该技
 | 向量 | Chroma（仅长期记忆热存储） |
 | 技能分发 | GitHub Releases（公开仓匿名 API；可选 PAT `GITHUB_TOKEN`） |
 
-## 快速开始（开发模式）
+## 快速开始（一键启停）
 
-前置：`uv`、`Node.js 20+`；后端依赖 PostgreSQL 与 Redis（本机安装，或 `docker compose up -d db redis`）。
-
-```bash
-# 1) 后端依赖与启动（读根目录 .env，DB_HOST 等默认指向 127.0.0.1）
-uv sync
-uv run uvicorn main:app --port 8000
-#    健康检查：curl http://127.0.0.1:8000/health
-
-# 2) 前端开发服务器（另一终端）
-cd frontend
-npm install
-npm run dev
-```
-
-构建可分发的 `.app`：
+前置：本机运行 Docker Desktop。
 
 ```bash
-bash up_build.sh   # cargo tauri build + 自动拉起缺失的 db/redis/chroma 依赖
-# 产物：src-tauri/target/release/bundle/macos/智作台.app
+./up.sh            # 启动全部：PostgreSQL + Redis + Chroma + 后端 + 前端（全 docker）
+./up.sh app        # 同上，并额外以 Tauri dev 模式打开桌面 App（需本机 Rust 环境）
+./up.sh --build    # 强制重建后端镜像（依赖变更后使用）
+./down.sh          # 停止全部并【清空数据】（下次启动为全新状态）
+./down.sh --keep-data  # 仅停止，保留数据
 ```
+
+启动后的地址：
+
+| 服务 | 地址 |
+|------|------|
+| 前端（网页） | http://127.0.0.1:5173 |
+| 后端 API | http://127.0.0.1:8000（文档 /docs） |
+| PostgreSQL | 127.0.0.1:15432 |
+| Redis | 127.0.0.1:16379 |
+| Chroma | 127.0.0.1:18001 |
+
+不用 nginx、Prometheus/Loki/Grafana 等运维组件——本项目只保留纯净的前后端与三个数据服务。
 
 ## 关键环境变量（根目录 `.env`）
 
@@ -80,70 +81,44 @@ bash up_build.sh   # cargo tauri build + 自动拉起缺失的 db/redis/chroma �
 | `SERPAPI_API_KEY` | - | 可选：联网搜索工具凭据（也可作为技能的 `env_whitelist` 透传） |
 | `GITHUB_TOKEN` | - | 可选：GitHub PAT，提升技能市场配额 / 访问私有源 |
 | `SKILL_SOURCES` | - | 默认技能源 JSON（`gh:owner/repo` 列表），不填则从市场 UI 添加 |
-| `APP_VERSION` / `UPDATE_MANIFEST_URL` | 0.1.0 / 空 | 版本与远端更新 manifest；留空时 `/api/update/check` 返回 501 |
 
-> 密钥管理：`.env` 已 gitignore / dockerignore，容器运行时注入，镜像内不含密钥。
-> 完整上线核对见 `文档/公网上线步骤.md` 等运维文档。
+> 密钥管理：`.env` 已 gitignore，不会进入版本库。
 
 ## 技能平台
 
 - **技能包契约 XST-Skill v1**：仓库根 `manifest.json` 为权威元数据；缺失时兼容回退读取
   `SKILL.md` frontmatter，因此 skill-template 仓库可零改动接入。
-- **打包**：`scripts/build_skill.py` 把技能目录打成 `skill-<slug>-<version>.xskill`（zip 单文件）。
-- **发布**：`scripts/release_skill.sh` 一键「打包 + git commit + tag + `gh release create`」。
+- **内置技能（本地包）**：技能源码位于 `data/skills/<slug>/`，`scripts/register_skill.py` 登记到市场
+  （source_key=local）；卸载只移除用户安装记录，技能代码与市场快照不删除。
 - **安装安全**：manifest 严格校验 → 防 zip-slip 安全解压到 `data/skills/<slug>/` → 写注册表；
   单个技能失败只影响它自己，不影响平台。
 - **Agent 落地**：`conversations.skill_id` 标识专属会话；`agent_runner` 动态注入技能提示与
   `skill_<slug>` 工具（子进程执行，JSON in/out、超时、env 白名单、Redis 分布式信号量限流）。
 
-开发技能 → 请读 **[文档/技能开发与发布.md](文档/技能开发与发布.md)**（目录结构 / manifest / CLI 契约 / 打包发布 / 检查清单）。
-示例技能仓库：`data/skills/_examples/`。
-
-## 版本更新
-
-1. 后端 / 前端 / 桌面版本统一见 `config.py: app_version`、`frontend/src/config.js: APP_VERSION`、
-   `src-tauri/tauri.conf.json + Cargo.toml`；
-2. 托管一份远端更新 manifest（示例）：
-   ```json
-   {
-     "version": "0.2.0",
-     "notes": "本次更新说明……",
-     "published_at": "2026-09-06T00:00:00Z",
-     "download_url": "https://github.com/owner/repo/releases/latest/download/ai-workbench.dmg"
-   }
-   ```
-3. `UPDATE_MANIFEST_URL` 指向该 URL；登录后在「系统设置 → 检查更新」手动检查 / 下载；
-   勾选「自动检查更新」后每次启动静默检查，发现新版本弹窗（可“稍后”）。
+内置技能示例：`data/skills/wechat-article-publish/`。
 
 ## 项目结构（要点）
 
 ```text
 main.py / config.py / schema.sql     # 入口、配置、DDL
-api/                                 # routes_auth/conversation/chat/messages/skills/update …
+up.sh / down.sh                      # 一键启动 / 停止清空（全 docker 编排）
+Dockerfile                           # 后端镜像（python:3.14-slim + uv）
+api/                                 # routes_auth / conversation / chat / messages / skills
 core/agent_runner.py                 # Agent 编排：通用工具 + 技能注入（skill_id）
 skills/                              # 技能平台：manifest(契约)/catalog(市场)/installer(安装)/runtime(执行)
-infra/                               # db(SQLAlchemy)/state_store(Redis 原语)/semaphore…
-tools/                               # web_search / memory / calc / time / local(本机控制) …
-scripts/                             # build_skill / release_skill / 备份 / 压测 …
-data/                                # 运行时数据：skills 安装目录、上传加密文件(私有部署按需)…
-frontend/                            # Vue3：ChatView / SkillMarketView / SettingsView / Placeholder…
-src-tauri/                           # Tauri 壳（窗口、本机执行、update 命令）
-observability/ + prometheus.yml      # 结构化日志 / /metrics / Grafana-Loki 栈
+infra/                               # db(SQLAlchemy)/state_store(Redis 原语)/messages/security/schemas/embeddings
+tools/                               # web_search / memory / calc / time / local(本机控制)
+scripts/                             # register_skill / reset_db / reset_chroma
+data/                                # 运行时数据：skills 安装目录
+frontend/                            # Vue3：ChatView / SkillMarketView / SettingsView
+src-tauri/                           # Tauri 壳（窗口、本机执行）
 ```
 
-## 可观测性与安全
+## 安全
 
-- JSON 结构化日志（`LOG_FORMAT=json`）+ `/metrics`（Prometheus）+ 审计日志（敏感写操作）+ `/healthz`；
 - JWT 双 token 可吊销（Redis 黑名单跨实例）、HTTP/WS 限流、bcrypt 密码哈希；
 - 技能子进程：超时、env 白名单、仅透传声明变量、敏感凭据不进日志；
-- 多实例无状态：锁 / 信号量 / 限流 / 缓存失效 / 注销黑名单全部走 Redis（`state_store.py`）。
-
-## 相关文档（文档/）
-
-- `文档/技能开发与发布.md` — 技能开发者手册（XST-Skill v1）
-- `文档/api.md` — 后端 API 说明
-- `文档/本地部署步骤.md` / `文档/公网上线步骤.md` — 部署与上线
-- `文档/健壮性与优化清单.md` — 生产加固对照
+- 锁 / 信号量 / 限流 / 缓存失效 / 注销黑名单全部走 Redis（`state_store.py`）。
 
 ## FAQ
 
@@ -151,5 +126,5 @@ observability/ + prometheus.yml      # 结构化日志 / /metrics / Grafana-Loki
 - **市场一直空 / 拉不到 Release**：先在「技能市场 → 管理技能源」添加含 `.xskill` 资产的公开仓库；
   匿名 GitHub API 有 60 次/时配额，平台已做 TTL 缓存与重试。
 - **技能任务没有工具**：技能需在 `manifest.json` 声明 `runtime.entry` 才会被包装为可执行工具；
-  纯提示词技能只有系统提示，不提供工具。
-- **下载更新打不开**：桌面端会调用系统浏览器打开 `download_url`；请确认远端 manifest 的 URL 可匿名访问。
+  纯提示词技能只有系统提示；声明 `permissions: ["local_control"]` 的本地控制类技能会额外注入
+  `open_webpage / run_apple_script` 等本机控制工具。

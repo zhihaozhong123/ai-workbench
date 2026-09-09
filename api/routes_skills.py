@@ -5,9 +5,12 @@
 - 技能安装 / 升级 / 卸载 / 我的技能（任务入口数据）。
 
 关键约束：
-- 市场数据由「源」驱动：技能元数据一律来自源同步（GitHub），禁止手工造数据；
-- 安装 = 下载 .xskill → 严格校验 → 原子落盘 data_root/skills → 登记 installed_skills；
-- 卸载仅针对当前用户；无任何用户再安装时才回收磁盘目录；
+- 市场数据由「源」驱动：技能元数据一律来自源同步（GitHub / 本地 data/skills），禁止手工造数据；
+- 本地技能（source_key=local）= 随平台分发的内置技能源码包，位于 data/skills/<slug>：
+  卸载【绝不删除】磁盘技能文件与市场快照，只移除当前用户的安装记录（前端对话任务入口消失，
+  市场重新点击「安装」即刻恢复）；
+- 远程技能：安装 = 下载 .xskill → 严格校验 → 原子落盘 data_root/skills → 登记 installed_skills；
+  卸载仅针对当前用户，无任何用户再安装时才清理其下载副本（市场快照保留，可随时重装）；
 - 安装失败会登记 status=failed 并保留错误，前端展示「重试」，不影响平台与其它技能。
 """
 from __future__ import annotations
@@ -30,13 +33,14 @@ from infra.db import (
     _utcnow,
     get_db,
 )
+import logging
+
 from infra.state_store import get_lock, get_redis
-from observability.logging_config import get_logger
 from skills import catalog
 from skills.installer import install_zip_bytes, remove_skill
 from skills.manifest import SkillError, load_manifest
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/skills", tags=["技能市场"])
 
@@ -356,10 +360,15 @@ async def install_skill(slug: str, user=Depends(get_current_user), db=Depends(ge
         if is_local:
             skill_dir = Path(settings.skills_root) / slug
             if not skill_dir.is_dir():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"本地技能文件缺失：{skill_dir}。请联系管理员运行 install_skill.py。",
-                )
+                # 尝试从项目根目录的 data/skills 找本地技能（开发阶段技能包直接放在 data/skills/）
+                alt_dir = Path(settings.skills_root).parent / "skills" / slug
+                if alt_dir.is_dir():
+                    skill_dir = alt_dir
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"本地技能文件缺失：{skill_dir}。请联系管理员运行 install_skill.py。",
+                    )
             try:
                 manifest = load_manifest(skill_dir)
             except (SkillError, OSError) as e:
@@ -444,14 +453,20 @@ async def uninstall_skill(slug: str, user=Depends(get_current_user), db=Depends(
         skill.updated_at = _utcnow()
     await db.commit()
 
-    # 磁盘回收：已无任何用户安装该技能时，清理技能目录（历史会话与消息保留）
+    # 磁盘/市场策略（技能代码绝不因卸载而删除）：
+    # - 本地技能（source_key=local）：代码包是 data/skills 下的内置技能源码，卸载只移除
+    #   当前用户的安装记录 → 前端对话任务立即消失；磁盘文件与市场快照原样保留，
+    #   重新点击「安装」即可再次使用（支持多人分别安装/卸载互不影响）。
+    # - 远程技能：仅当平台再无任何用户安装时才清理其下载副本，释放磁盘；
+    #   市场快照仍保留（来源同步可随时重装）。
     still_used = (await db.execute(
         select(InstalledSkill.id).where(InstalledSkill.slug == slug).limit(1)
     )).scalar_one_or_none()
-    if still_used is None:
+    if still_used is None and skill is not None and skill.source_key != "local":
         try:
             remove_skill(settings.skills_root, slug)
         except OSError as e:
-            log.warning("[技能] 卸载时清理技能目录失败 %s: %s", slug, e)
+            log.warning("[技能] 卸载时清理下载副本失败 %s: %s", slug, e)
+
     log.info("[技能] 卸载 %s (user=%s)", slug, user_id)
     return {"ok": True}

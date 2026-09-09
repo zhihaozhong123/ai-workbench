@@ -270,6 +270,50 @@ pub fn run() {
             execute_local_action,
             get_signature_status
         ])
+        .setup(|app| {
+            // 禁用 WebView 的前进/后退导航，移除 macOS 自带的 Back / Reload 按钮
+            #[cfg(target_os = "macos")]
+            {
+                use objc2_app_kit::NSWindow;
+                use objc2_web_kit::WKWebView;
+                use objc2::rc::Retained;
+                use objc2::ClassType;
+                use objc2::runtime::NSObjectProtocol;
+                use tauri::Manager;
+
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(ns_win_ptr) = window.ns_window() {
+                        if let Some(ns_window) =
+                            unsafe { Retained::retain(ns_win_ptr as *mut NSWindow) }
+                        {
+                            // 移除窗口自带的 toolbar（macOS 会在 toolbar 上放 Back/Reload）
+                            ns_window.setToolbar(None);
+                        }
+                    }
+                    // 禁用 WKWebView 的前进/后退导航手势
+                    if let Ok(ns_view_ptr) = window.ns_view() {
+                        unsafe {
+                            // ns_view 返回的是 wry 的父视图 WryWebViewParent，
+                            // WKWebView 是其子视图，需要遍历查找
+                            let parent_view: Retained<objc2_app_kit::NSView> =
+                                Retained::retain(ns_view_ptr as *mut objc2_app_kit::NSView)
+                                    .unwrap();
+                            let subviews = parent_view.subviews();
+                            for i in 0..subviews.count() {
+                                let subview = subviews.objectAtIndex(i);
+                                if subview.isKindOfClass(WKWebView::class()) {
+                                    let webview: Retained<WKWebView> =
+                                        Retained::cast_unchecked(subview);
+                                    webview.setAllowsBackForwardNavigationGestures(false);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

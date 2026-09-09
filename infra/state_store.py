@@ -12,9 +12,9 @@ import uuid
 import asyncio
 
 from config import settings
-from observability.logging_config import get_logger
+import logging
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 _redis = None
 _redis_url = settings.redis_url.strip()

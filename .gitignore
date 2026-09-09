@@ -1,31 +1,61 @@
-# 本地凭证（绝不进 git）
-.163_creds
-.env
+# =====================================================
+# 智作台 · AI Workbench 根 .gitignore
+# 目标：大体积依赖 / 密钥 / 本地运行时产物一律不入库；
+#       从仓库拉取后按 README + up.sh 一键安装启动即可（不含任何本地生成物）
+# =====================================================
 
-# 更新签名密钥（绝不进 git）
-scripts/updater_keys/
-scripts/update_manifest/
+# ---------- 系统 / 编辑器 ----------
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-# 更新文件（DMG 安装包不进 git）
-updates/downloads/*.dmg
-
-# 构建临时目录
-build_tmp/
-
-# 技能构建产物（.xskill 通过 GitHub Release 分发，不入 git）
-data/skills/*/dist/
-data/skills/dist/
-*.xskill
-
-# 独立技能仓库（有自己的 git，不进 ai-workbench）
-skill-scaffold/
-skills-src/
-skill-template/
-
-# Python
+# ---------- Python / uv ----------
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .venv/
-cache/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 *.log
+cache/
+
+# ---------- Node / 前端（Vue + Vite） ----------
+# node_modules 无斜杠模式 = 匹配任意层级（根/子目录）
+node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Rust / Tauri 桌面端 ----------
+# 构建产物（gen/schemas 等生成但需随仓库分发的文件保持跟踪，勿整体忽略 src-tauri）
 src-tauri/target/
+
+# ---------- 环境变量与密钥（.env.example 模板例外保留） ----------
+# .env 无斜杠 = 同时覆盖根目录与 frontend/.env 等任意层级
+.env
+.env.*
+!.env.example
+
+# ---------- 运行时数据（后端容器把宿主机 ./data 挂到 /app/data；
+#           其中 data/skills 是内置技能源码，必须提交，仅忽略运行期产物） ----------
+data/uploads/
+data/chroma/
+data/logs/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.db-journal
+updates/
+
+# ---------- 本地 IDE 工作台历史（不入仓库） ----------
+.workbuddy/

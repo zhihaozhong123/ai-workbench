@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 import urllib.parse
 from typing import Any
@@ -20,10 +21,9 @@ from typing import Any
 import httpx
 import yaml
 
-from observability.logging_config import get_logger
 from skills.manifest import SkillError, build_manifest, parse_frontmatter
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 # .xskill 资产文件名规则：skill-<slug>-<version>.xskill
 _XSKILL_RE = re.compile(r"\.xskill$", re.IGNORECASE)
@@ -74,6 +74,8 @@ def source_key_parts(source_key: str) -> tuple[str, str]:
 
 
 def source_url(source_key: str) -> str:
+    if not source_key or source_key == "local":
+        return ""
     owner, repo = source_key_parts(source_key)
     return f"https://github.com/{owner}/{repo}"
 
